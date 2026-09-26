@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
+import android.util.Log
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Handler
@@ -73,12 +74,36 @@ class MainActivity : FlutterActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private var interpreter: Interpreter? = null
 
+    /** 日志标签（logcat 过滤用：ChongLeMe） */
+    private val TAG = "ChongLeMe"
+
+    /** 当前实际生效的模型名（null = 尚未加载）。用于确定 84MB 主模型是否可用 */
+    private var activeModelName: String? = null
+
+    /** 兜底原因说明（仅在回退到 u2netp 时非空，区分是 OOM 还是其它加载失败） */
+    private var fallbackNote: String? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "buildVersion" -> result.success(BUILD_TAG)
+                    "modelInfo" -> {
+                        // 报告当前实际生效的模型，用于确认 84MB 主模型在真机是否可用
+                        val label = when (activeModelName) {
+                            PRIMARY_MODEL -> "u2net 高清(84MB)"
+                            FALLBACK_MODEL -> "u2netp 兜底(4.4MB)"
+                            else -> "未加载"
+                        }
+                        result.success(
+                            mapOf(
+                                "buildTag" to BUILD_TAG,
+                                "activeModel" to label,
+                                "fallbackNote" to (fallbackNote ?: "")
+                            )
+                        )
+                    }
                     "removeBackground" -> {
                         val path = call.argument<String>("path")
                         if (path.isNullOrBlank()) {
@@ -379,33 +404,75 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    /** 依次尝试 [主模型 → 兜底模型]；任一成功即返回，全部失败抛可读错误。 */
+    /** 依次尝试 [主模型 u2net 84MB → 兜底 u2netp 4.4MB]，并记录实际生效模型与回退原因。
+     *  任一成功即返回；全部失败抛可读错误。每次加载都打明确日志，便于真机确认 84MB 是否 OOM。 */
     private fun createSegmenter(): Interpreter {
-        val order = listOf(PRIMARY_MODEL, FALLBACK_MODEL)
-        var lastErr: Throwable? = null
-        for (name in order) {
-            var seg: Interpreter? = null
+        // —— 第一步：主模型 u2net（84MB，边缘质量最好）——
+        try {
+            val buffer = loadModelBuffer(PRIMARY_MODEL)
+            val seg = Interpreter(buffer, Interpreter.Options().setNumThreads(4))
             try {
-                val buffer = loadModelBuffer(name)
-                seg = Interpreter(buffer, Interpreter.Options().setNumThreads(4))
                 val inShape = seg.getInputTensor(0).shape()
                 if (inShape.any { it <= 0 }) {
                     seg.resizeInput(0, intArrayOf(1, MODEL_INPUT, MODEL_INPUT, 3))
                 }
                 seg.allocateTensors()
-                return seg
             } catch (e: Throwable) {
-                // 主模型 OOM / 加载失败：释放已分配资源，继续尝试下一个（兜底）模型
-                lastErr = e
-                try { seg?.close() } catch (_: Throwable) { }
-                seg = null
+                seg.close()
+                throw e
+            }
+            activeModelName = PRIMARY_MODEL
+            fallbackNote = null
+            Log.i(TAG, "[$BUILD_TAG] 主模型 u2net(84MB) 加载成功，使用高清模型")
+            return seg
+        } catch (e: Throwable) {
+            val oom = isMemoryError(e)
+            Log.w(
+                TAG,
+                "[$BUILD_TAG] 主模型 u2net(84MB) 加载/分配失败（${e.javaClass.simpleName}: ${e.message}），" +
+                    "是否内存不足=$oom，将回退 u2netp 兜底"
+            )
+
+            // —— 第二步：兜底模型 u2netp（4.4MB）——
+            try {
+                val buffer = loadModelBuffer(FALLBACK_MODEL)
+                val seg = Interpreter(buffer, Interpreter.Options().setNumThreads(4))
+                try {
+                    val inShape = seg.getInputTensor(0).shape()
+                    if (inShape.any { it <= 0 }) {
+                        seg.resizeInput(0, intArrayOf(1, MODEL_INPUT, MODEL_INPUT, 3))
+                    }
+                    seg.allocateTensors()
+                } catch (e2: Throwable) {
+                    seg.close()
+                    throw e2
+                }
+                activeModelName = FALLBACK_MODEL
+                fallbackNote = if (oom) "（主模型内存不足自动降级）" else "（主模型加载失败自动降级）"
+                Log.w(TAG, "[$BUILD_TAG] 已回退到兜底模型 u2netp(4.4MB)${fallbackNote}")
+                return seg
+            } catch (e2: Throwable) {
+                Log.e(TAG, "[$BUILD_TAG] 兜底模型 u2netp 也加载失败：${e2.message}")
             }
         }
         throw IllegalStateException(
             "模型加载失败：u2net.tflite 与 u2netp.tflite 均无法加载" +
-                (if (lastErr != null) "（末次错误：${lastErr.message}）" else "") +
                 "。确认打包流程已把两个模型都下载到 android/app/src/main/assets/ 再重新构建。"
         )
+    }
+
+    /** 判断异常链里是否含内存不足（OutOfMemoryError / allocate 失败 / 含 oom/memory 字样的消息） */
+    private fun isMemoryError(t: Throwable?): Boolean {
+        var e = t
+        while (e != null) {
+            if (e is OutOfMemoryError) return true
+            val m = e.message?.lowercase() ?: ""
+            if (m.contains("oom") || m.contains("out of memory") ||
+                m.contains("failed to allocate") || m.contains("memory")
+            ) return true
+            e = e.cause
+        }
+        return false
     }
 
     /** 从原生 AssetManager 读取指定模型；依次尝试 assets 根目录 / 两种 Flutter 资源历史写法 */

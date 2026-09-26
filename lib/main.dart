@@ -46,6 +46,14 @@ class SegmentationService {
     }
   }
 
+  /// 查询当前实际生效的抠图模型（首次抠图后才可知）。
+  /// 返回 { buildTag, activeModel, fallbackNote }，用于确认 84MB 主模型在真机是否可用。
+  /// 旧包未实现该通道时抛异常，调用方需 try/catch 忽略。
+  static Future<Map<Object?, Object?>> modelInfo() async {
+    final r = await _channel.invokeMethod<Map<Object?, Object?>>('modelInfo');
+    return r ?? {};
+  }
+
   /// 输入原图路径，返回抠好背景（透明 PNG）的文件路径。
   /// [maskSource] 选择模型 7 路侧输出之一（0~6）：第 1 路是最终融合图，
   /// 其余是不同深度的边缘响应，真机上可切换对比选出边缘最好的一路。
@@ -118,6 +126,10 @@ class _HomePageState extends State<HomePage> {
   /// 原生端构建标识：用于确认真机上装的是修复后的包
   late final Future<String> _nativeVersion = SegmentationService.nativeVersion();
 
+  /// 当前生效的抠图模型（首次抠图后才可知）。用于确认 84MB 主模型在真机是否可用，
+  /// 还是因内存不足自动回退到了 4.4MB 兜底模型。
+  String? _activeModel;
+
   /// 用当前边缘源对当前图重新抠图（对比 d1~d7 时用）
   Future<void> _reprocessCurrent() async {
     final item = _items[_selected.clamp(0, _items.length - 1)];
@@ -136,6 +148,7 @@ class _HomePageState extends State<HomePage> {
           ..cutoutPath = out
           ..status = PetItemStatus.done;
       });
+      _refreshModelInfo();
     } on SegmentationException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -220,15 +233,37 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 首页底部的版本徽章：看到 v1.3.0 = 新包；看到 old-apk = 旧包还在运行
+  /// 首页底部的版本徽章：看到 v1.3.0 = 新包；看到 old-apk = 旧包还在运行。
+  /// 首次抠图后会追加当前生效模型（u2net 高清 / u2netp 兜底），用于确认 84MB 主模型是否可用。
   Widget _versionBadge() {
     return FutureBuilder<String>(
       future: _nativeVersion,
-      builder: (context, snap) => Text(
-        '原生端 ${snap.data ?? "…"}',
-        style: TextStyle(fontSize: 10, color: Colors.brown.shade200),
-      ),
+      builder: (context, snap) {
+        final base = '原生端 ${snap.data ?? "…"}';
+        final model = _activeModel != null ? ' · 模型: $_activeModel' : '';
+        return Text(
+          base + model,
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 10, color: Colors.brown.shade200),
+        );
+      },
     );
+  }
+
+  /// 抠图成功后刷新当前生效模型信息（确认 84MB 主模型是否可用 / 是否回退兜底）。
+  /// 旧包没有 modelInfo 通道时会抛异常，这里静默忽略即可。
+  Future<void> _refreshModelInfo() async {
+    try {
+      final info = await SegmentationService.modelInfo();
+      if (!mounted) return;
+      final name = (info['activeModel'] as String?) ?? '未知';
+      final note = (info['fallbackNote'] as String?) ?? '';
+      setState(() {
+        _activeModel = if (note.isEmpty) name else '$name$note';
+      });
+    } catch (_) {
+      // 旧包未实现 modelInfo 通道：忽略，徽章只显示版本号
+    }
   }
 
   Widget _buildEmpty() {
