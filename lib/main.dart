@@ -259,7 +259,7 @@ class _HomePageState extends State<HomePage> {
       final name = (info['activeModel'] as String?) ?? '未知';
       final note = (info['fallbackNote'] as String?) ?? '';
       setState(() {
-        _activeModel = if (note.isEmpty) name else '$name$note';
+        _activeModel = note.isEmpty ? name : '$name$note';
       });
     } catch (_) {
       // 旧包未实现 modelInfo 通道：忽略，徽章只显示版本号
