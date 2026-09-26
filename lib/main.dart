@@ -101,76 +101,113 @@ class PetItem {
 }
 
 // ============================================================
-// 2.5D 纸片宠物 · 动作库（20 个）
-// 每个动作 = 一个 t∈[0,1] 的变换函数；t=1 时回到单位矩阵，动作结束干净归位
+// ============================================================
+// P1 · 可动 2.5D 骨骼宠物（头 / 身 / 尾 三层 + 可枚举姿态）
+// 纯 Dart/Flutter 实现：不新增依赖、不接原生渲染器、不接 DragonBones
+// 贴图直接复用真实抠图结果（Image.file(cutoutPath)），不 AI 重绘
 // ============================================================
 
-typedef PetTransform = Matrix4 Function(double t);
+/// 单层（头 / 身 / 尾）的姿态参数
+class PartPose {
+  final double rotZ; // 绕自身锚点 Z 旋转（弧度）
+  final double rotY; // 绕 Y 旋转（轻微转体）
+  final double dx; // 水平位移（逻辑像素，正=右）
+  final double dy; // 垂直位移（逻辑像素，正=下）
+  final double scaleX;
+  final double scaleY;
 
-class PetAction {
-  const PetAction(this.name, this.icon, this.transform);
-  final String name;
-  final IconData icon;
-  final PetTransform transform;
+  const PartPose({
+    this.rotZ = 0,
+    this.rotY = 0,
+    this.dx = 0,
+    this.dy = 0,
+    this.scaleX = 1,
+    this.scaleY = 1,
+  });
+
+  PartPose lerp(PartPose o, double k) => PartPose(
+        rotZ: rotZ + (o.rotZ - rotZ) * k,
+        rotY: rotY + (o.rotY - rotY) * k,
+        dx: dx + (o.dx - dx) * k,
+        dy: dy + (o.dy - dy) * k,
+        scaleX: scaleX + (o.scaleX - scaleX) * k,
+        scaleY: scaleY + (o.scaleY - scaleY) * k,
+      );
 }
 
-Matrix4 _m() => Matrix4.identity();
+/// 一个完整姿态 = 头 / 身 / 尾 三层的参数
+class PoseSpec {
+  final PartPose head;
+  final PartPose body;
+  final PartPose tail;
 
-const List<PetAction> kPetActions = [
-  PetAction('摇尾巴', Icons.pets, _aWag),
-  PetAction('打滚', Icons.autorenew, _aRoll),
-  PetAction('扑跳', Icons.flash_on, _aPounce),
-  PetAction('撒娇', Icons.favorite, _aCute),
-  PetAction('伸懒腰', Icons.landscape, _aStretch),
-  PetAction('歪头', Icons.face_retouching_natural, _aTilt),
-  PetAction('点头', Icons.keyboard_arrow_down, _aNod),
-  PetAction('蹦跳', Icons.celebration, _aHop),
-  PetAction('转圈', Icons.rotate_90_degrees_ccw, _aSpin),
-  PetAction('坐下', Icons.chair, _aSit),
-  PetAction('趴下', Icons.horizontal_rule, _aLie),
-  PetAction('摇身', Icons.swap_horiz, _aShake),
-  PetAction('卖萌', Icons.emoji_emotions, _aMoe),
-  PetAction('好奇', Icons.visibility, _aCurious),
-  PetAction('开心', Icons.sentiment_very_satisfied, _aHappy),
-  PetAction('委屈', Icons.sentiment_dissatisfied, _aSad),
-  PetAction('兴奋', Icons.whatshot, _aExcited),
-  PetAction('召唤', Icons.campaign, _aCome),
-  PetAction('飞吻', Icons.favorite_border, _aKiss),
-  PetAction('转头', Icons.rotate_right, _aTurn),
+  const PoseSpec({
+    this.head = const PartPose(),
+    this.body = const PartPose(),
+    this.tail = const PartPose(),
+  });
+
+  PoseSpec lerp(PoseSpec o, double k) => PoseSpec(
+        head: head.lerp(o.head, k),
+        body: body.lerp(o.body, k),
+        tail: tail.lerp(o.tail, k),
+      );
+}
+
+/// 可枚举姿态（点按后保持）
+enum Pose { idle, sit, lie, stretch, tilt, look }
+
+/// 各姿态的目标参数
+const Map<Pose, PoseSpec> kPoseSpecs = {
+  Pose.idle: PoseSpec(), // 站立 / 呼吸（呼吸在渲染层叠加）
+  Pose.sit: PoseSpec(
+    body: PartPose(scaleY: 0.82, dy: 20),
+    head: PartPose(dy: -10, scaleY: 1.06),
+    tail: PartPose(dy: 8),
+  ),
+  Pose.lie: PoseSpec(
+    body: PartPose(scaleY: 0.58, dy: 46),
+    head: PartPose(dy: 26, scaleY: 1.12, rotZ: 0.12),
+    tail: PartPose(dy: 30, rotZ: -0.2),
+  ),
+  Pose.stretch: PoseSpec(
+    body: PartPose(scaleY: 1.2, dy: -16),
+    head: PartPose(dy: -20, rotZ: 0.16),
+    tail: PartPose(rotZ: 0.22),
+  ),
+  Pose.tilt: PoseSpec(
+    head: PartPose(rotZ: -0.42, dy: -4),
+  ),
+  Pose.look: PoseSpec(
+    head: PartPose(rotY: 0.5, dy: -2),
+    body: PartPose(rotY: 0.18),
+  ),
+};
+
+/// 动作栏条目：姿态（保持）或 动态动作（一次性 / 循环）
+class PetButton {
+  final String name;
+  final IconData icon;
+  final Pose? pose; // 非 null = 点按切换到该姿态并保持
+  final String? action; // 非 null = 触发一次性 / 循环动态动作
+  const PetButton.pose(this.name, this.icon, this.pose) : action = null;
+  const PetButton.action(this.name, this.icon, this.action) : pose = null;
+}
+
+const List<PetButton> kPetButtons = [
+  PetButton.pose('站立', Icons.accessibility, Pose.idle),
+  PetButton.pose('坐下', Icons.chair, Pose.sit),
+  PetButton.pose('趴下', Icons.horizontal_rule, Pose.lie),
+  PetButton.pose('伸懒腰', Icons.landscape, Pose.stretch),
+  PetButton.pose('歪头', Icons.face_retouching_natural, Pose.tilt),
+  PetButton.pose('远眺', Icons.visibility, Pose.look),
+  PetButton.action('摇尾巴', Icons.pets, 'wag'),
+  PetButton.action('转圈', Icons.rotate_90_degrees_ccw, 'spin'),
+  PetButton.action('打滚', Icons.autorenew, 'roll'),
+  PetButton.action('蹦跳', Icons.celebration, 'hop'),
 ];
 
-Matrix4 _aWag(double t) => _m()..rotateZ(sin(t * 2 * pi * 3) * 0.18);
-Matrix4 _aRoll(double t) => _m()..rotateZ(t * 2 * pi);
-Matrix4 _aPounce(double t) =>
-    (_m()..translate(0.0, -sin(pi * t) * 130.0))..scale(1.0 + 0.12 * sin(pi * t));
-Matrix4 _aCute(double t) => (_m()
-  ..rotateZ(sin(pi * t * 2) * 0.12))
-  ..scale(1.0 + 0.06 * sin(pi * t * 2), 1.0 - 0.04 * sin(pi * t * 2));
-Matrix4 _aStretch(double t) =>
-    _m()..scale(1.0 - 0.12 * sin(pi * t), 1.0 + 0.22 * sin(pi * t));
-Matrix4 _aTilt(double t) => _m()..rotateZ(-0.35 * sin(pi * t));
-Matrix4 _aNod(double t) => _m()..rotateX(0.3 * sin(pi * t));
-Matrix4 _aHop(double t) => _m()..translate(0.0, -sin(pi * t * 2).abs() * 90.0);
-Matrix4 _aSpin(double t) => _m()..rotateY(t * 2 * pi * 2);
-Matrix4 _aSit(double t) =>
-    (_m()..translate(0.0, 10.0 * sin(pi * t)))..scale(1.0, 1.0 - 0.18 * sin(pi * t));
-Matrix4 _aLie(double t) => _m()..scale(1.0, 1.0 - 0.32 * sin(pi * t));
-Matrix4 _aShake(double t) => _m()..translate(sin(pi * t * 6) * 22.0, 0.0);
-Matrix4 _aMoe(double t) => _m()..scale(1.0 + 0.16 * sin(pi * t));
-Matrix4 _aCurious(double t) =>
-    (_m()..rotateZ(0.12 * sin(pi * t)))..scale(1.0 + 0.08 * sin(pi * t));
-Matrix4 _aHappy(double t) =>
-    (_m()..translate(0.0, -sin(pi * t * 3).abs() * 70.0))
-    ..rotateZ(sin(pi * t * 3) * 0.1);
-Matrix4 _aSad(double t) =>
-    (_m()..translate(0.0, 8.0 * sin(pi * t)))..rotateZ(-0.08 * sin(pi * t));
-Matrix4 _aExcited(double t) =>
-    (_m()..translate(0.0, -sin(pi * t * 4).abs() * 100.0))
-    ..scale(1.0 + 0.08 * sin(pi * t * 4));
-Matrix4 _aCome(double t) => _m()..scale(1.0 + 0.2 * sin(pi * t));
-Matrix4 _aKiss(double t) =>
-    (_m()..rotateZ(0.1 * sin(pi * t)))..scale(1.0 + 0.14 * sin(pi * t));
-Matrix4 _aTurn(double t) => _m()..rotateY(sin(pi * t) * 0.7);
+
 
 // ============================================================
 // 首页：选照片 → 抠图 → 2.5D 纸片宠物舞台
@@ -201,6 +238,9 @@ class _HomePageState extends State<HomePage> {
   /// 定时撒娇开关
   bool _coquetryOn = false;
 
+  /// P1 知情确认（仅首次展示「2.5D 非真 3D」说明）
+  bool _signedOffV1_5 = false;
+
   final GlobalKey<_PetStageState> _stageKey = GlobalKey<_PetStageState>();
 
   final FlutterLocalNotificationsPlugin _notifications =
@@ -220,7 +260,39 @@ class _HomePageState extends State<HomePage> {
     _backgroundPath = prefs.getString('backgroundPath');
     _coquetryOn = prefs.getBool('coquetry') ?? false;
     if (_coquetryOn) _startCoquetry();
+    _signedOffV1_5 = prefs.getBool('signedOffV1_5') ?? false;
+    if (!_signedOffV1_5) {
+      await prefs.setBool('signedOffV1_5', true);
+      _signedOffV1_5 = true;
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _showSignOff());
+      }
+    }
     if (mounted) setState(() {});
+  }
+
+  Future<void> _showSignOff() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('用「真实宠物照片」做一个会动的数字宠物'),
+        content: const Text(
+          '你上传的宠物照片会在手机本地被抠掉背景，生成一只「会动的数字毛孩」。\n\n'
+          '需要提前说明：当前版本是【可动 2.5D 立绘】——它由「头 / 身 / 尾」三层拼成，'
+          '能坐、能趴、能摇尾巴、能转头，但还不是真正的 3D 模型（不能 360° 任意转）。'
+          '后续版本会进阶到真 3D。\n\n'
+          '所有处理都在你的手机上离线完成，照片不会上传。',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('开始制作 ❤'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _initNotifications() async {
@@ -407,7 +479,7 @@ class _HomePageState extends State<HomePage> {
       backgroundColor: const Color(0xFFFDF8F1),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        title: Text('宠了么 · 1.4.0 · $_petName'),
+        title: Text('宠了么 · 1.5.0 · $_petName'),
         actions: [
           if (_picking)
             const Padding(
@@ -522,24 +594,34 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 20 个动作按钮（横向滚动）
+  /// P1 动作栏：可枚举姿态（点按保持）+ 动态动作（转圈/打滚/蹦跳/摇尾）
   Widget _buildActionBar() {
     return SizedBox(
-      height: 64,
+      height: 72,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        itemCount: kPetActions.length,
+        itemCount: kPetButtons.length,
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, i) {
-          final a = kPetActions[i];
+          final b = kPetButtons[i];
+          final active = b.pose != null &&
+              _stageKey.currentState?.activePose == b.pose;
           return InkWell(
-            onTap: () => _stageKey.currentState?.playAction(a),
+            onTap: () {
+              if (b.pose != null) {
+                _stageKey.currentState?.setPose(b.pose!);
+              } else if (b.action != null) {
+                _stageKey.currentState?.triggerAction(b.action!);
+              }
+            },
             borderRadius: BorderRadius.circular(14),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: active
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.white,
                 borderRadius: BorderRadius.circular(14),
                 border: Border.all(color: Colors.brown.shade200),
                 boxShadow: [
@@ -553,10 +635,16 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(a.icon, size: 20, color: Colors.brown.shade600),
+                  Icon(b.icon,
+                      size: 20,
+                      color: active ? Colors.white : Colors.brown.shade600),
                   const SizedBox(height: 2),
-                  Text(a.name,
-                      style: TextStyle(fontSize: 11, color: Colors.brown.shade700)),
+                  Text(b.name,
+                      style: TextStyle(
+                          fontSize: 11,
+                          color: active
+                              ? Colors.white
+                              : Colors.brown.shade700)),
                 ],
               ),
             ),
@@ -683,8 +771,9 @@ class _HomePageState extends State<HomePage> {
 }
 
 // ============================================================
-// 2.5D 纸片宠物舞台
-// 拖动转视角 + 呼吸 + 落影 + 点击摸头 + 20 动作 + 喂食
+// ============================================================
+// P1 · 可动 2.5D 骨骼宠物舞台（头/身/尾分层 + 可枚举姿态）
+// 纯 Dart/Flutter，不新增依赖、不接原生渲染器、不接 DragonBones
 // ============================================================
 
 class PetStage extends StatefulWidget {
@@ -704,7 +793,7 @@ class PetStage extends StatefulWidget {
 }
 
 class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
-  // 呼吸
+  // 呼吸（叠加在身体上）
   late final AnimationController _breathCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 2800),
@@ -712,12 +801,28 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
   late final CurvedAnimation _breath =
       CurvedAnimation(parent: _breathCtrl, curve: Curves.easeInOut);
 
-  // 动作播放（单次）
+  // 姿态切换（坐/趴/站/歪头… 平滑过渡并保持）
+  late final AnimationController _poseCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..addListener(() => setState(() {}));
+  PoseSpec _fromSpec = kPoseSpecs[Pose.idle]!;
+  Pose _pose = Pose.idle;
+  Pose get activePose => _pose;
+
+  // 一次性动态动作（转圈/打滚/蹦跳）
   late final AnimationController _actionCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  );
+  String? _activeAction;
+
+  // 摇尾巴（循环，仅在用户点「摇尾巴」时启动）
+  late final AnimationController _wagCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 900),
   );
-  PetAction? _currentAction;
+  bool _wagging = false;
 
   // 点击跳跃
   late final AnimationController _jumpCtrl = AnimationController(
@@ -740,6 +845,11 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
   );
   bool _showFood = false;
 
+  // 分层切割比例（首次进入可拖动微调，让宠物更像原图）
+  double _headSplit = 0.34; // 头/身分界（占高度比例，自上而下）
+  double _tailSplit = 0.82; // 身/尾分界
+  bool _adjusting = false;
+
   final AudioPlayer _player = AudioPlayer();
   final Random _random = Random();
   Timer? _hideBubbleTimer;
@@ -756,7 +866,7 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
     _dragCtrl.addListener(() => setState(() {}));
     _actionCtrl.addStatusListener((status) {
       if (status == AnimationStatus.completed) {
-        setState(() => _currentAction = null);
+        setState(() => _activeAction = null);
       }
     });
     _feedCtrl.addStatusListener((status) {
@@ -769,8 +879,42 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
     });
   }
 
-  void playAction(PetAction action) {
-    setState(() => _currentAction = action);
+  PoseSpec _liveSpec() => _fromSpec.lerp(kPoseSpecs[_pose]!, _poseCtrl.value);
+
+  void setPose(Pose p) {
+    _fromSpec = _liveSpec();
+    _pose = p;
+    _stopDynamic();
+    _poseCtrl.forward(from: 0);
+  }
+
+  void _stopDynamic() {
+    if (_activeAction != null) {
+      _activeAction = null;
+      _actionCtrl.stop();
+    }
+    if (_wagging) {
+      _wagging = false;
+      _wagCtrl.stop();
+    }
+  }
+
+  void triggerAction(String id) {
+    if (id == 'wag') {
+      _wagging = !_wagging;
+      if (_wagging) {
+        _activeAction = null;
+        _actionCtrl.stop();
+        _wagCtrl.repeat();
+      } else {
+        _wagCtrl.stop();
+      }
+      setState(() {});
+      return;
+    }
+    _wagging = false;
+    _wagCtrl.stop();
+    setState(() => _activeAction = id);
     _actionCtrl.forward(from: 0);
   }
 
@@ -785,7 +929,9 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
   @override
   void dispose() {
     _breathCtrl.dispose();
+    _poseCtrl.dispose();
     _actionCtrl.dispose();
+    _wagCtrl.dispose();
     _jumpCtrl.dispose();
     _dragCtrl.dispose();
     _feedCtrl.dispose();
@@ -842,6 +988,50 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
     _dragCtrl.forward(from: 0).then((_) => _dragRotY = 0.0);
   }
 
+  PartPose _add(PartPose a, PartPose b) => PartPose(
+        rotZ: a.rotZ + b.rotZ,
+        rotY: a.rotY + b.rotY,
+        dx: a.dx + b.dx,
+        dy: a.dy + b.dy,
+        scaleX: a.scaleX * b.scaleX,
+        scaleY: a.scaleY * b.scaleY,
+      );
+
+  PoseSpec _dynamicDelta() {
+    if (_wagging) {
+      final w = sin(_wagCtrl.value * 2 * pi * 4) * 0.5;
+      return PoseSpec(tail: PartPose(rotZ: w));
+    }
+    if (_activeAction == 'spin') {
+      final r = sin(_actionCtrl.value * pi) * 2 * pi;
+      final p = PartPose(rotY: r);
+      return PoseSpec(head: p, body: p, tail: p);
+    }
+    if (_activeAction == 'roll') {
+      final r = sin(_actionCtrl.value * pi) * 2 * pi;
+      final p = PartPose(rotZ: r);
+      return PoseSpec(head: p, body: p, tail: p);
+    }
+    if (_activeAction == 'hop') {
+      final d = -sin(_actionCtrl.value * 2 * pi).abs() * 90.0;
+      final p = PartPose(dy: d);
+      return PoseSpec(head: p, body: p, tail: p);
+    }
+    return const PoseSpec();
+  }
+
+  Matrix4 _partMatrix(PartPose p, double pivotY) {
+    final m = Matrix4.identity();
+    m.setEntry(3, 2, -0.001);
+    m.translate(0.0, pivotY);
+    m.multiply(Matrix4.rotationZ(p.rotZ));
+    m.multiply(Matrix4.rotationY(p.rotY));
+    m.multiply(Matrix4.diagonal3Values(p.scaleX, p.scaleY, 1.0));
+    m.translate(p.dx, p.dy);
+    m.translate(0.0, -pivotY);
+    return m;
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -868,45 +1058,48 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
                   ),
                 ),
               ),
-            // 落影（宠物跳起时影子留在地上）
             SizedBox(width: imgW, height: imgH, child: _buildGroundShadow()),
-            // 宠物本体（可拖动转视角、点击摸头）
+            // 宠物本体（头/身/尾三层 + 拖动转视角 + 点击摸头）
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _poke,
               onPanUpdate: _onPanUpdate,
               onPanEnd: _onPanEnd,
               child: AnimatedBuilder(
-                animation: Listenable.merge([_breath, _jumpCtrl, _actionCtrl]),
-                builder: (context, child) {
+                animation: Listenable.merge([
+                  _breath,
+                  _poseCtrl,
+                  _actionCtrl,
+                  _wagCtrl,
+                  _jumpCtrl,
+                  _dragCtrl,
+                ]),
+                builder: (context, _) {
                   final dragRot = _dragCtrl.isAnimating
                       ? _dragFrom * (1 - _dragCtrl.value)
                       : _dragRotY;
-                  final actionM = _currentAction?.transform(_actionCtrl.value) ??
-                      Matrix4.identity();
                   final lift = -sin(pi * _jumpCtrl.value) * 64.0;
                   final breath = 1.0 + 0.025 * _breath.value;
 
-                  final m = Matrix4.identity()..setEntry(3, 2, -0.0018);
-                  m.multiply(Matrix4.rotationY(dragRot));
-                  m.multiply(actionM);
-                  m.translate(0.0, lift);
-                  m.multiply(Matrix4.diagonal3Values(1.0, breath, 1.0));
+                  final base = _liveSpec();
+                  final dyn = _dynamicDelta();
+                  final head = _add(base.head, dyn.head);
+                  final body = _add(base.body, dyn.body);
+                  final tail = _add(base.tail, dyn.tail);
+
+                  final global = Matrix4.identity()..setEntry(3, 2, -0.0018);
+                  global.multiply(Matrix4.rotationY(dragRot));
+                  global.translate(0.0, lift);
+                  global.multiply(Matrix4.diagonal3Values(1.0, breath, 1.0));
 
                   return Transform(
                     alignment: Alignment.bottomCenter,
-                    transform: m,
-                    child: child,
+                    transform: global,
+                    child: _buildLayeredPet(imgW, imgH, head, body, tail),
                   );
                 },
-                child: SizedBox(
-                  width: imgW,
-                  height: imgH,
-                  child: _buildPetImage(),
-                ),
               ),
             ),
-            // 喂食动画
             if (_showFood)
               AnimatedBuilder(
                 animation: _feedCtrl,
@@ -921,14 +1114,24 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
                   );
                 },
               ),
-            // 叫声 / 喂食气泡
-            Positioned(
-              top: stageH * 0.04,
-              child: _buildBubble(),
-            ),
-            // 摸头爱心
+            Positioned(top: stageH * 0.04, child: _buildBubble()),
             ..._buildHearts(stageH),
-            // 状态提示
+            Positioned(
+              top: 8,
+              right: 8,
+              child: IconButton(
+                icon: Icon(
+                  _adjusting ? Icons.check : Icons.tune,
+                  color: Colors.white,
+                ),
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.brown.withOpacity(0.55),
+                ),
+                tooltip: _adjusting ? '完成微调' : '微调头/身/尾分界',
+                onPressed: () => setState(() => _adjusting = !_adjusting),
+              ),
+            ),
+            if (_adjusting) _buildSplitHandles(imgW, imgH),
             Positioned(
               left: 16,
               right: 16,
@@ -938,6 +1141,130 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
           ],
         );
       },
+    );
+  }
+
+  Widget _buildLayeredPet(
+    double imgW,
+    double imgH,
+    PartPose head,
+    PartPose body,
+    PartPose tail,
+  ) {
+    final item = widget.item;
+    if (item.status != PetItemStatus.done || item.cutoutPath == null) {
+      return _buildBusyPet(imgW, imgH);
+    }
+    final file = File(item.cutoutPath!);
+    final pivotHead = (_headSplit - 0.5) * imgH;
+    final pivotBody = (_headSplit - 0.5) * imgH;
+    final pivotTail = (_tailSplit - 0.5) * imgH;
+
+    Widget layer(PartPose p, double topF, double botF, double pivotY) {
+      final m = _partMatrix(p, pivotY);
+      return Transform(
+        alignment: Alignment.topLeft,
+        transform: m,
+        child: ClipRect(
+          clipper: _BandClipper(topF, botF),
+          child: Image.file(
+            file,
+            fit: BoxFit.cover,
+            width: imgW,
+            height: imgH,
+            errorBuilder: (_, __, ___) =>
+                const Icon(Icons.broken_image_outlined, size: 48),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: imgW,
+      height: imgH,
+      child: Stack(
+        children: [
+          layer(tail, _tailSplit, 1.0, pivotTail),
+          layer(body, _headSplit, _tailSplit, pivotBody),
+          layer(head, 0.0, _headSplit, pivotHead),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBusyPet(double imgW, double imgH) {
+    final item = widget.item;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.brown.withOpacity(0.18),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.file(
+              File(item.originalPath),
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  const Icon(Icons.broken_image_outlined, size: 48),
+            ),
+            if (item.status == PetItemStatus.processing)
+              Container(
+                color: Colors.black.withOpacity(0.25),
+                alignment: Alignment.center,
+                child: const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Colors.white),
+                    SizedBox(height: 10),
+                    Text('正在抠图…', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSplitHandles(double imgW, double imgH) {
+    Widget handle(double frac, void Function(double) onUpdate, Color color) {
+      return Positioned(
+        top: frac * imgH - 14,
+        left: 0,
+        right: 0,
+        child: GestureDetector(
+          onPanUpdate: (d) => onUpdate(
+              ((frac * imgH + d.delta.dy) / imgH).clamp(0.1, 0.9)),
+          child: Container(
+            height: 28,
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.85),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.drag_handle, color: Colors.white, size: 18),
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: imgW,
+      height: imgH,
+      child: Stack(
+        children: [
+          handle(_headSplit, (v) => setState(() => _headSplit = v), Colors.orange),
+          handle(_tailSplit, (v) => setState(() => _tailSplit = v), Colors.green),
+        ],
+      ),
     );
   }
 
@@ -994,57 +1321,6 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
     );
   }
 
-  Widget _buildPetImage() {
-    final item = widget.item;
-    if (item.status == PetItemStatus.done && item.cutoutPath != null) {
-      return Image.file(
-        File(item.cutoutPath!),
-        fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) =>
-            const Icon(Icons.broken_image_outlined, size: 48),
-      );
-    }
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.brown.withOpacity(0.18),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(24),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Image.file(
-              File(item.originalPath),
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  const Icon(Icons.broken_image_outlined, size: 48),
-            ),
-            if (item.status == PetItemStatus.processing)
-              Container(
-                color: Colors.black.withOpacity(0.25),
-                alignment: Alignment.center,
-                child: const Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    CircularProgressIndicator(color: Colors.white),
-                    SizedBox(height: 10),
-                    Text('正在抠图…', style: TextStyle(color: Colors.white)),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildBubble() {
     return AnimatedOpacity(
       opacity: _showBubble ? 1 : 0,
@@ -1089,7 +1365,8 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
         color = Colors.brown;
         break;
       case PetItemStatus.done:
-        text = '${widget.petName} 已生成 · 点它摸头 · 拖动可转视角 · 下方选动作';
+        text =
+            '${widget.petName} 已生成 · 点它摸头 · 拖动转视角 · 下方选姿态/动作 · 右上角可微调';
         color = Colors.green.shade700;
         break;
       case PetItemStatus.failed:
@@ -1103,4 +1380,17 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
       style: TextStyle(fontSize: 12, color: color),
     );
   }
+}
+
+/// 垂直分带裁剪：只显示图像 [topF, botF] 区间（占高度比例）
+class _BandClipper extends CustomClipper<Rect> {
+  final double topF;
+  final double botF;
+  const _BandClipper(this.topF, this.botF);
+  @override
+  Rect getClip(Size size) =>
+      Rect.fromLTRB(0, topF * size.height, size.width, botF * size.height);
+  @override
+  bool shouldReclip(_BandClipper old) =>
+      old.topF != topF || old.botF != botF;
 }

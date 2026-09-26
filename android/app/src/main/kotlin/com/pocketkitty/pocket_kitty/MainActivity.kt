@@ -46,7 +46,7 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "pet_segmentation/segment"
 
         /** 构建标识：首页底部可见，报错自动带上 */
-        private const val BUILD_TAG = "v1.3.0"
+        private const val BUILD_TAG = "v1.5.0"
 
         /** 主模型：全量 U2-Net（84MB，边缘质量最好），320×320 输入，7 路侧输出 d1~d7。
          *  原"84MB 在华为 OOM"根因是全分辨率 Bitmap（已用 512px 上限根除），故恢复使用。 */
