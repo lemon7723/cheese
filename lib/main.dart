@@ -7,6 +7,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const PocketKittyApp());
@@ -18,7 +20,7 @@ class PocketKittyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '口袋毛孩',
+      title: '宠了么',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
@@ -30,7 +32,7 @@ class PocketKittyApp extends StatelessWidget {
 }
 
 // ============================================================
-// 原生桥接：iOS Vision Framework / Android ML Kit 主体分割
+// 原生桥接：Android TFLite / 抠图（MethodChannel 契约不可改）
 // ============================================================
 
 class SegmentationService {
@@ -47,18 +49,15 @@ class SegmentationService {
   }
 
   /// 查询当前实际生效的抠图模型（首次抠图后才可知）。
-  /// 返回 { buildTag, activeModel, fallbackNote }，用于确认 84MB 主模型在真机是否可用。
-  /// 旧包未实现该通道时抛异常，调用方需 try/catch 忽略。
   static Future<Map<Object?, Object?>> modelInfo() async {
     final r = await _channel.invokeMethod<Map<Object?, Object?>>('modelInfo');
     return r ?? {};
   }
 
   /// 输入原图路径，返回抠好背景（透明 PNG）的文件路径。
-  /// [maskSource] 选择模型 7 路侧输出之一（0~6）：第 1 路是最终融合图，
-  /// 其余是不同深度的边缘响应，真机上可切换对比选出边缘最好的一路。
-  /// 失败时抛 [SegmentationException]，message 可直接展示给用户。
-  static Future<String> removeBackground(String path, {int maskSource = 0}) async {
+  /// [maskSource] 选择模型 7 路侧输出之一（0~6）。
+  static Future<String> removeBackground(String path,
+      {int maskSource = 0}) async {
     try {
       final out = await _channel.invokeMethod<String>(
           'removeBackground', {'path': path, 'maskSource': maskSource});
@@ -69,8 +68,7 @@ class SegmentationService {
     } on PlatformException catch (e) {
       throw SegmentationException(e.message ?? '抠图失败（${e.code}）');
     } on MissingPluginException {
-      throw const SegmentationException(
-          '原生桥接未注册，请检查 AppDelegate / MainActivity 配置');
+      throw const SegmentationException('原生桥接未注册');
     }
   }
 }
@@ -78,7 +76,6 @@ class SegmentationService {
 class SegmentationException implements Exception {
   const SegmentationException(this.message);
   final String message;
-
   @override
   String toString() => message;
 }
@@ -104,7 +101,79 @@ class PetItem {
 }
 
 // ============================================================
-// 首页：选照片 → 自动抠图 → 展示
+// 2.5D 纸片宠物 · 动作库（20 个）
+// 每个动作 = 一个 t∈[0,1] 的变换函数；t=1 时回到单位矩阵，动作结束干净归位
+// ============================================================
+
+typedef PetTransform = Matrix4 Function(double t);
+
+class PetAction {
+  const PetAction(this.name, this.icon, this.transform);
+  final String name;
+  final IconData icon;
+  final PetTransform transform;
+}
+
+Matrix4 _m() => Matrix4.identity();
+
+const List<PetAction> kPetActions = [
+  PetAction('摇尾巴', Icons.pets, _aWag),
+  PetAction('打滚', Icons.autorenew, _aRoll),
+  PetAction('扑跳', Icons.flash_on, _aPounce),
+  PetAction('撒娇', Icons.favorite, _aCute),
+  PetAction('伸懒腰', Icons.landscape, _aStretch),
+  PetAction('歪头', Icons.face_retouching_natural, _aTilt),
+  PetAction('点头', Icons.keyboard_arrow_down, _aNod),
+  PetAction('蹦跳', Icons.celebration, _aHop),
+  PetAction('转圈', Icons.rotate_90_degrees_ccw, _aSpin),
+  PetAction('坐下', Icons.chair, _aSit),
+  PetAction('趴下', Icons.horizontal_rule, _aLie),
+  PetAction('摇身', Icons.swap_horiz, _aShake),
+  PetAction('卖萌', Icons.emoji_emotions, _aMoe),
+  PetAction('好奇', Icons.visibility, _aCurious),
+  PetAction('开心', Icons.sentiment_very_satisfied, _aHappy),
+  PetAction('委屈', Icons.sentiment_dissatisfied, _aSad),
+  PetAction('兴奋', Icons.whatshot, _aExcited),
+  PetAction('召唤', Icons.campaign, _aCome),
+  PetAction('飞吻', Icons.favorite_border, _aKiss),
+  PetAction('转头', Icons.rotate_right, _aTurn),
+];
+
+Matrix4 _aWag(double t) => _m()..rotateZ(sin(t * 2 * pi * 3) * 0.18);
+Matrix4 _aRoll(double t) => _m()..rotateZ(t * 2 * pi);
+Matrix4 _aPounce(double t) =>
+    (_m()..translate(0.0, -sin(pi * t) * 130.0))..scale(1.0 + 0.12 * sin(pi * t));
+Matrix4 _aCute(double t) => (_m()
+  ..rotateZ(sin(pi * t * 2) * 0.12))
+  ..scale(1.0 + 0.06 * sin(pi * t * 2), 1.0 - 0.04 * sin(pi * t * 2));
+Matrix4 _aStretch(double t) =>
+    _m()..scale(1.0 - 0.12 * sin(pi * t), 1.0 + 0.22 * sin(pi * t));
+Matrix4 _aTilt(double t) => _m()..rotateZ(-0.35 * sin(pi * t));
+Matrix4 _aNod(double t) => _m()..rotateX(0.3 * sin(pi * t));
+Matrix4 _aHop(double t) => _m()..translate(0.0, -sin(pi * t * 2).abs() * 90.0);
+Matrix4 _aSpin(double t) => _m()..rotateY(t * 2 * pi * 2);
+Matrix4 _aSit(double t) =>
+    (_m()..translate(0.0, 10.0 * sin(pi * t)))..scale(1.0, 1.0 - 0.18 * sin(pi * t));
+Matrix4 _aLie(double t) => _m()..scale(1.0, 1.0 - 0.32 * sin(pi * t));
+Matrix4 _aShake(double t) => _m()..translate(sin(pi * t * 6) * 22.0, 0.0);
+Matrix4 _aMoe(double t) => _m()..scale(1.0 + 0.16 * sin(pi * t));
+Matrix4 _aCurious(double t) =>
+    (_m()..rotateZ(0.12 * sin(pi * t)))..scale(1.0 + 0.08 * sin(pi * t));
+Matrix4 _aHappy(double t) =>
+    (_m()..translate(0.0, -sin(pi * t * 3).abs() * 70.0))
+    ..rotateZ(sin(pi * t * 3) * 0.1);
+Matrix4 _aSad(double t) =>
+    (_m()..translate(0.0, 8.0 * sin(pi * t)))..rotateZ(-0.08 * sin(pi * t));
+Matrix4 _aExcited(double t) =>
+    (_m()..translate(0.0, -sin(pi * t * 4).abs() * 100.0))
+    ..scale(1.0 + 0.08 * sin(pi * t * 4));
+Matrix4 _aCome(double t) => _m()..scale(1.0 + 0.2 * sin(pi * t));
+Matrix4 _aKiss(double t) =>
+    (_m()..rotateZ(0.1 * sin(pi * t)))..scale(1.0 + 0.14 * sin(pi * t));
+Matrix4 _aTurn(double t) => _m()..rotateY(sin(pi * t) * 0.7);
+
+// ============================================================
+// 首页：选照片 → 抠图 → 2.5D 纸片宠物舞台
 // ============================================================
 
 class HomePage extends StatefulWidget {
@@ -119,19 +188,134 @@ class _HomePageState extends State<HomePage> {
   final List<PetItem> _items = [];
   int _selected = 0;
   bool _picking = false;
-
-  /// 边缘源（模型 7 路侧输出的 0~6），切换后自动重抠当前图
   int _maskSource = 0;
 
-  /// 原生端构建标识：用于确认真机上装的是修复后的包
-  late final Future<String> _nativeVersion = SegmentationService.nativeVersion();
-
-  /// 当前生效的抠图模型（首次抠图后才可知）。用于确认 84MB 主模型在真机是否可用，
-  /// 还是因内存不足自动回退到了 4.4MB 兜底模型。
+  late final Future<String> _nativeVersion =
+      SegmentationService.nativeVersion();
   String? _activeModel;
 
-  /// 用当前边缘源对当前图重新抠图（对比 d1~d7 时用）
+  /// 宠物名字（可改名并持久化）
+  String _petName = '毛孩';
+  /// 自定义背景图路径
+  String? _backgroundPath;
+  /// 定时撒娇开关
+  bool _coquetryOn = false;
+
+  final GlobalKey<_PetStageState> _stageKey = GlobalKey<_PetStageState>();
+
+  final FlutterLocalNotificationsPlugin _notifications =
+      FlutterLocalNotificationsPlugin();
+  Timer? _coquetryTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _initPrefs();
+    _initNotifications();
+  }
+
+  Future<void> _initPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    _petName = prefs.getString('petName') ?? '毛孩';
+    _backgroundPath = prefs.getString('backgroundPath');
+    _coquetryOn = prefs.getBool('coquetry') ?? false;
+    if (_coquetryOn) _startCoquetry();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _initNotifications() async {
+    const android =
+        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const init = InitializationSettings(android: android);
+    await _notifications.initialize(init);
+    try {
+      await _notifications
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.requestNotificationsPermission();
+    } catch (_) {
+      // 老版本系统无需请求，忽略
+    }
+  }
+
+  void _startCoquetry() {
+    _coquetryTimer?.cancel();
+    _coquetryTimer = Timer.periodic(
+      const Duration(hours: 2),
+      (_) => _fireCoquetry(),
+    );
+  }
+
+  Future<void> _fireCoquetry() async {
+    const androidDetails = AndroidNotificationDetails(
+      'coquetry',
+      '撒娇提醒',
+      channelDescription: '你的毛孩想你了',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const details = NotificationDetails(android: androidDetails);
+    await _notifications.show(
+      DateTime.now().millisecond,
+      '$_petName 想你了',
+      '陪陪它、摸摸它吧～',
+      details,
+    );
+  }
+
+  Future<void> _toggleCoquetry(bool on) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('coquetry', on);
+    setState(() => _coquetryOn = on);
+    if (on) {
+      _startCoquetry();
+      _fireCoquetry();
+    } else {
+      _coquetryTimer?.cancel();
+    }
+  }
+
+  Future<void> _rename() async {
+    final controller = TextEditingController(text: _petName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('给毛孩起个名字'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 12,
+          decoration: const InputDecoration(hintText: '例如：豆豆'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (name != null && name.isNotEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('petName', name);
+      setState(() => _petName = name);
+    }
+  }
+
+  Future<void> _pickBackground() async {
+    final img = await _picker.pickImage(source: ImageSource.gallery);
+    if (img == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('backgroundPath', img.path);
+    setState(() => _backgroundPath = img.path);
+  }
+
   Future<void> _reprocessCurrent() async {
+    if (_items.isEmpty) return;
     final item = _items[_selected.clamp(0, _items.length - 1)];
     setState(() {
       item
@@ -139,8 +323,7 @@ class _HomePageState extends State<HomePage> {
         ..status = PetItemStatus.processing;
     });
     try {
-      final out = await SegmentationService.removeBackground(
-          item.originalPath,
+      final out = await SegmentationService.removeBackground(item.originalPath,
           maskSource: _maskSource);
       if (!mounted) return;
       setState(() {
@@ -163,10 +346,8 @@ class _HomePageState extends State<HomePage> {
     if (_picking) return;
     setState(() => _picking = true);
     try {
-      // 一次可多选，把多张不同角度的照片一起选中
       final pics = await _picker.pickMultiImage();
       if (pics == null || pics.isEmpty) return;
-
       final start = _items.length;
       setState(() {
         for (final p in pics) {
@@ -174,13 +355,10 @@ class _HomePageState extends State<HomePage> {
         }
         _selected = start;
       });
-
-      // 依次送到原生端抠图
       for (var i = start; i < _items.length; i++) {
         final item = _items[i];
         try {
-          final out = await SegmentationService.removeBackground(
-              item.originalPath,
+          final out = await SegmentationService.removeBackground(item.originalPath,
               maskSource: _maskSource);
           if (!mounted) return;
           setState(() {
@@ -197,9 +375,30 @@ class _HomePageState extends State<HomePage> {
           });
         }
       }
+      _refreshModelInfo();
     } finally {
       if (mounted) setState(() => _picking = false);
     }
+  }
+
+  Future<void> _refreshModelInfo() async {
+    try {
+      final info = await SegmentationService.modelInfo();
+      if (!mounted) return;
+      final name = (info['activeModel'] as String?) ?? '未知';
+      final note = (info['fallbackNote'] as String?) ?? '';
+      setState(() {
+        _activeModel = note.isEmpty ? name : '$name$note';
+      });
+    } catch (_) {
+      // 旧包未实现 modelInfo 通道：忽略，徽章只显示版本
+    }
+  }
+
+  @override
+  void dispose() {
+    _coquetryTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -208,18 +407,12 @@ class _HomePageState extends State<HomePage> {
       backgroundColor: const Color(0xFFFDF8F1),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
-        title: const Text('宠了么 · 1.3.0'),
+        title: Text('宠了么 · 1.4.0 · $_petName'),
         actions: [
           if (_picking)
             const Padding(
               padding: EdgeInsets.only(right: 16),
-              child: Center(
-                child: SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
+              child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
             )
           else
             IconButton(
@@ -227,14 +420,38 @@ class _HomePageState extends State<HomePage> {
               onPressed: _pickAndProcess,
               icon: const Icon(Icons.add_photo_alternate_outlined),
             ),
+          IconButton(
+            tooltip: '改名',
+            onPressed: _rename,
+            icon: const Icon(Icons.edit_note_outlined),
+          ),
+          IconButton(
+            tooltip: '换背景',
+            onPressed: _pickBackground,
+            icon: const Icon(Icons.wallpaper_outlined),
+          ),
+          IconButton(
+            tooltip: '喂食',
+            onPressed: () => _stageKey.currentState?.feed(),
+            icon: const Icon(Icons.fastfood_outlined),
+          ),
+          PopupMenuButton<void>(
+            itemBuilder: (ctx) => [
+              CheckedPopupMenuItem(
+                value: null,
+                checked: _coquetryOn,
+                child: const Text('每 2 小时撒娇提醒'),
+                onTap: () => Future(() => _toggleCoquetry(!_coquetryOn)),
+              ),
+            ],
+            icon: const Icon(Icons.more_vert),
+          ),
         ],
       ),
       body: _items.isEmpty ? _buildEmpty() : _buildStage(),
     );
   }
 
-  /// 首页底部的版本徽章：看到 v1.3.0 = 新包；看到 old-apk = 旧包还在运行。
-  /// 首次抠图后会追加当前生效模型（u2net 高清 / u2netp 兜底），用于确认 84MB 主模型是否可用。
   Widget _versionBadge() {
     return FutureBuilder<String>(
       future: _nativeVersion,
@@ -250,22 +467,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 抠图成功后刷新当前生效模型信息（确认 84MB 主模型是否可用 / 是否回退兜底）。
-  /// 旧包没有 modelInfo 通道时会抛异常，这里静默忽略即可。
-  Future<void> _refreshModelInfo() async {
-    try {
-      final info = await SegmentationService.modelInfo();
-      if (!mounted) return;
-      final name = (info['activeModel'] as String?) ?? '未知';
-      final note = (info['fallbackNote'] as String?) ?? '';
-      setState(() {
-        _activeModel = note.isEmpty ? name : '$name$note';
-      });
-    } catch (_) {
-      // 旧包未实现 modelInfo 通道：忽略，徽章只显示版本号
-    }
-  }
-
   Widget _buildEmpty() {
     return Center(
       child: Padding(
@@ -279,7 +480,7 @@ class _HomePageState extends State<HomePage> {
                 style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 8),
             Text(
-              '选 2-3 张清晰照片（不同角度更佳），\n自动抠除背景，保留真实的它。',
+              '选 2-3 张清晰照片（不同角度），\n自动抠除背景，保留真实的它。',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.brown.shade400, height: 1.6),
             ),
@@ -302,14 +503,17 @@ class _HomePageState extends State<HomePage> {
     return SafeArea(
       child: Column(
         children: [
-          Expanded(child: PetStage(item: item)),
+          Expanded(
+            child: PetStage(
+              key: _stageKey,
+              item: item,
+              petName: _petName,
+              backgroundPath: _backgroundPath,
+            ),
+          ),
+          _buildActionBar(),
           _buildMaskSourceChips(),
           _buildThumbs(),
-          const SizedBox(height: 8),
-          Text(
-            '点一下它试试 · 底部可切换角度',
-            style: TextStyle(fontSize: 12, color: Colors.brown.shade300),
-          ),
           const SizedBox(height: 2),
           _versionBadge(),
           const SizedBox(height: 4),
@@ -318,15 +522,58 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 边缘源调试芯片：d1~d7 对应模型 7 路侧输出，点击即切换并重抠当前图
+  /// 20 个动作按钮（横向滚动）
+  Widget _buildActionBar() {
+    return SizedBox(
+      height: 64,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        itemCount: kPetActions.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final a = kPetActions[i];
+          return InkWell(
+            onTap: () => _stageKey.currentState?.playAction(a),
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.brown.shade200),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.brown.withOpacity(0.06),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(a.icon, size: 20, color: Colors.brown.shade600),
+                  const SizedBox(height: 2),
+                  Text(a.name,
+                      style: TextStyle(fontSize: 11, color: Colors.brown.shade700)),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// 边缘源调试芯片：d1~d7 对应模型 7 路侧输出
   Widget _buildMaskSourceChips() {
     return SizedBox(
       height: 44,
       child: Row(
         children: [
           const SizedBox(width: 16),
-          Text('边缘源',
-              style: TextStyle(fontSize: 11, color: Colors.brown.shade400)),
+          Text('边缘源', style: TextStyle(fontSize: 11, color: Colors.brown.shade400)),
           const SizedBox(width: 8),
           Expanded(
             child: ListView.separated(
@@ -360,8 +607,7 @@ class _HomePageState extends State<HomePage> {
                       'd${i + 1}',
                       style: TextStyle(
                         fontSize: 12,
-                        fontWeight:
-                            selected ? FontWeight.w600 : FontWeight.w400,
+                        fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                         color: selected ? Colors.white : Colors.brown.shade500,
                       ),
                     ),
@@ -437,19 +683,28 @@ class _HomePageState extends State<HomePage> {
 }
 
 // ============================================================
-// 舞台：呼吸动画 + 柔和落影 + 点击跳跃与叫声气泡
+// 2.5D 纸片宠物舞台
+// 拖动转视角 + 呼吸 + 落影 + 点击摸头 + 20 动作 + 喂食
 // ============================================================
 
 class PetStage extends StatefulWidget {
-  const PetStage({super.key, required this.item});
+  const PetStage({
+    super.key,
+    required this.item,
+    required this.petName,
+    this.backgroundPath,
+  });
 
   final PetItem item;
+  final String petName;
+  final String? backgroundPath;
 
   @override
   State<PetStage> createState() => _PetStageState();
 }
 
 class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
+  // 呼吸
   late final AnimationController _breathCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 2800),
@@ -457,16 +712,40 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
   late final CurvedAnimation _breath =
       CurvedAnimation(parent: _breathCtrl, curve: Curves.easeInOut);
 
+  // 动作播放（单次）
+  late final AnimationController _actionCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+  PetAction? _currentAction;
+
+  // 点击跳跃
   late final AnimationController _jumpCtrl = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 560),
   );
+
+  // 拖动转视角回弹
+  late final AnimationController _dragCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 420),
+  );
+  double _dragRotY = 0.0;
+  double _dragFrom = 0.0;
+
+  // 喂食
+  late final AnimationController _feedCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+  bool _showFood = false;
 
   final AudioPlayer _player = AudioPlayer();
   final Random _random = Random();
   Timer? _hideBubbleTimer;
   bool _showBubble = false;
   String _bubbleText = '喵～';
+  final List<String> _hearts = [];
 
   static const List<String> _meows = ['喵～', '喵呜～', '喵嗷！', '喵？', '咕噜咕噜…'];
 
@@ -474,31 +753,67 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _player.setVolume(0.9);
+    _dragCtrl.addListener(() => setState(() {}));
+    _actionCtrl.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        setState(() => _currentAction = null);
+      }
+    });
+    _feedCtrl.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        setState(() => _showFood = false);
+        _showBubble = true;
+        _bubbleText = '好吃！';
+        _scheduleBubbleHide();
+      }
+    });
+  }
+
+  void playAction(PetAction action) {
+    setState(() => _currentAction = action);
+    _actionCtrl.forward(from: 0);
+  }
+
+  void feed() {
+    setState(() {
+      _showFood = true;
+      _showBubble = false;
+    });
+    _feedCtrl.forward(from: 0);
   }
 
   @override
   void dispose() {
     _breathCtrl.dispose();
+    _actionCtrl.dispose();
     _jumpCtrl.dispose();
+    _dragCtrl.dispose();
+    _feedCtrl.dispose();
     _hideBubbleTimer?.cancel();
     _player.dispose();
     super.dispose();
   }
 
-    Future<void> _poke() async {
-    if (!_jumpCtrl.isAnimating) {
-      _jumpCtrl.forward(from: 0);
-    }
-    setState(() {
-      _bubbleText = _meows[_random.nextInt(_meows.length)];
-      _showBubble = true;
-    });
+  void _scheduleBubbleHide() {
     _hideBubbleTimer?.cancel();
     _hideBubbleTimer = Timer(const Duration(milliseconds: 1500), () {
       if (mounted) setState(() => _showBubble = false);
     });
+  }
 
-    // 叫声三级降级：assets 音频 → 原生系统提示音 → 纯气泡
+  Future<void> _poke() async {
+    if (!_jumpCtrl.isAnimating) _jumpCtrl.forward(from: 0);
+    setState(() {
+      _bubbleText = _meows[_random.nextInt(_meows.length)];
+      _showBubble = true;
+      _hearts.add('❤');
+      if (_hearts.length > 6) _hearts.removeAt(0);
+    });
+    _scheduleBubbleHide();
+    _playMeow();
+  }
+
+  Future<void> _playMeow() async {
     var played = false;
     try {
       await _player.setPlaybackRate(0.9 + _random.nextDouble() * 0.3);
@@ -512,9 +827,19 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
         await const MethodChannel('pet_segmentation/segment')
             .invokeMethod('clickSound');
       } catch (_) {
-        // 都失败就只显示气泡，不打扰用户
+        // 都失败就只显示气泡
       }
     }
+  }
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    _dragRotY = (_dragRotY + d.delta.dx * 0.008).clamp(-0.7, 0.7);
+    setState(() {});
+  }
+
+  void _onPanEnd(DragEndDetails _) {
+    _dragFrom = _dragRotY;
+    _dragCtrl.forward(from: 0).then((_) => _dragRotY = 0.0);
   }
 
   @override
@@ -524,34 +849,53 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
         final stageH = constraints.maxHeight;
         final stageW = constraints.maxWidth;
         final imgW = min<double>(stageW * 0.72, 340);
-        final imgH = stageH * 0.60;
+        final imgH = stageH * 0.58;
 
         return Stack(
           alignment: Alignment.center,
           children: [
-            // 落影（垫在宠物后面，宠物跳起时影子留在地上）
-            SizedBox(
-              width: imgW,
-              height: imgH,
-              child: _buildGroundShadow(),
-            ),
-            // 宠物本体
+            if (widget.backgroundPath != null)
+              Positioned.fill(
+                child: ColorFiltered(
+                  colorFilter: ColorFilter.mode(
+                    Colors.black.withOpacity(0.12),
+                    BlendMode.darken,
+                  ),
+                  child: Image.file(
+                    File(widget.backgroundPath!),
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ),
+                ),
+              ),
+            // 落影（宠物跳起时影子留在地上）
+            SizedBox(width: imgW, height: imgH, child: _buildGroundShadow()),
+            // 宠物本体（可拖动转视角、点击摸头）
             GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: _poke,
+              onPanUpdate: _onPanUpdate,
+              onPanEnd: _onPanEnd,
               child: AnimatedBuilder(
-                animation: Listenable.merge([_breath, _jumpCtrl]),
+                animation: Listenable.merge([_breath, _jumpCtrl, _actionCtrl]),
                 builder: (context, child) {
-                  final t = _jumpCtrl.value;
-                  final lift = -sin(pi * t) * 64.0;
-                  final breath = 1.0 + 0.02 * _breath.value;
-                  final stretchY = (1.0 + 0.10 * sin(pi * t)) * breath;
-                  final squashX = (1.0 - 0.07 * sin(pi * t)) * breath;
+                  final dragRot = _dragCtrl.isAnimating
+                      ? _dragFrom * (1 - _dragCtrl.value)
+                      : _dragRotY;
+                  final actionM = _currentAction?.transform(_actionCtrl.value) ??
+                      Matrix4.identity();
+                  final lift = -sin(pi * _jumpCtrl.value) * 64.0;
+                  final breath = 1.0 + 0.025 * _breath.value;
+
+                  final m = Matrix4.identity()..setEntry(3, 2, -0.0018);
+                  m.multiply(Matrix4.rotationY(dragRot));
+                  m.multiply(actionM);
+                  m.translate(0.0, lift);
+                  m.multiply(Matrix4.diagonal3Values(1.0, breath, 1.0));
+
                   return Transform(
                     alignment: Alignment.bottomCenter,
-                    transform: Matrix4.identity()
-                      ..translate(0.0, lift)
-                      ..scale(squashX, stretchY),
+                    transform: m,
                     child: child,
                   );
                 },
@@ -562,11 +906,28 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
                 ),
               ),
             ),
-            // 叫声气泡
+            // 喂食动画
+            if (_showFood)
+              AnimatedBuilder(
+                animation: _feedCtrl,
+                builder: (context, child) {
+                  final drop = _feedCtrl.value;
+                  return Positioned(
+                    top: 8 + drop * (stageH * 0.42),
+                    child: Opacity(
+                      opacity: 1 - drop * 0.2,
+                      child: const Text('🍖', style: TextStyle(fontSize: 34)),
+                    ),
+                  );
+                },
+              ),
+            // 叫声 / 喂食气泡
             Positioned(
-              top: stageH * 0.06,
+              top: stageH * 0.04,
               child: _buildBubble(),
             ),
+            // 摸头爱心
+            ..._buildHearts(stageH),
             // 状态提示
             Positioned(
               left: 16,
@@ -580,14 +941,24 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
     );
   }
 
+  List<Widget> _buildHearts(double stageH) {
+    return _hearts.asMap().entries.map((e) {
+      final i = e.key;
+      return Positioned(
+        right: 24 + i * 18,
+        top: stageH * 0.12 + i * 6,
+        child: const Text('❤', style: TextStyle(fontSize: 20, color: Colors.red)),
+      );
+    }).toList();
+  }
+
   Widget _buildGroundShadow() {
     final item = widget.item;
     if (item.status == PetItemStatus.done && item.cutoutPath != null) {
-      // 用同一张透明图做黑色剪影，模糊后向下偏移 = 贴合轮廓的柔和落影
       return Transform.translate(
         offset: const Offset(0, 14),
         child: Opacity(
-          opacity: 0.25,
+          opacity: 0.22,
           child: ImageFiltered(
             imageFilter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
             child: ColorFiltered(
@@ -603,7 +974,6 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
         ),
       );
     }
-    // 原图 / 处理中：只留一团椭圆光斑
     return Align(
       alignment: Alignment.bottomCenter,
       child: Container(
@@ -634,7 +1004,6 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
             const Icon(Icons.broken_image_outlined, size: 48),
       );
     }
-    // 处理中 / 失败：显示原图占位
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(24),
@@ -661,13 +1030,12 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
               Container(
                 color: Colors.black.withOpacity(0.25),
                 alignment: Alignment.center,
-                child: Column(
+                child: const Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: const [
+                  children: [
                     CircularProgressIndicator(color: Colors.white),
                     SizedBox(height: 10),
-                    Text('正在抠图…',
-                        style: TextStyle(color: Colors.white)),
+                    Text('正在抠图…', style: TextStyle(color: Colors.white)),
                   ],
                 ),
               ),
@@ -721,7 +1089,7 @@ class _PetStageState extends State<PetStage> with TickerProviderStateMixin {
         color = Colors.brown;
         break;
       case PetItemStatus.done:
-        text = '已生成 1:1 数字毛孩 · 点它有惊喜';
+        text = '${widget.petName} 已生成 · 点它摸头 · 拖动可转视角 · 下方选动作';
         color = Colors.green.shade700;
         break;
       case PetItemStatus.failed:

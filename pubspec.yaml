@@ -1,7 +1,7 @@
 name: pocket_kitty
-description: "宠了么 1.2.0 轻量离线抠图版：上传宠物前后左右四视图，本地抠图生成 1:1 数字宠物。"
+description: "宠了么 1.4.0：本地离线抠图生成数字毛孩，2.5D 纸片宠物（拖动转视角+呼吸+落影）、20 个动作、摸头/喂食/改名/换背景/每2小时撒娇提醒。"
 publish_to: 'none'
-version: 1.3.0+6
+version: 1.4.0+7
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
