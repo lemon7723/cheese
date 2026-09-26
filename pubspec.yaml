@@ -1,0 +1,30 @@
+name: pocket_kitty
+description: "宠了么 1.2.0 轻量离线抠图版：上传宠物前后左右四视图，本地抠图生成 1:1 数字宠物。"
+publish_to: 'none'
+version: 1.3.0+6
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image_picker: ^1.1.2
+  audioplayers: ^6.1.0
+  # 以下为下一步功能预留（定时撒娇本地通知 / 改名与设置持久化 / 路径），当前 MVP 已可用
+  flutter_local_notifications: ^17.2.0
+  path_provider: ^2.1.5
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+
+  # 叫声音频：把 meow.mp3 放到 assets/sounds/ 后取消下面两行注释，再 flutter pub get
+  # 没有音频文件时 App 自动用系统提示音代替，不影响运行
+  assets:
+    - assets/sounds/

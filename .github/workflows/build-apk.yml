@@ -1,0 +1,114 @@
+name: Build Android APK
+
+on:
+  # 手动触发：GitHub 仓库页 → Actions → Build Android APK → Run workflow
+  workflow_dispatch:
+  # 每次推代码自动打包
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 注：抠图模型（u2net 84MB / u2netp 4.4MB）不在仓库内，
+      # 由下方「下载抠图模型」步骤在 flutter create 之后联网拉取并打入 APK。
+      # 仓库保持纯代码，规避 GitHub 25MB 上传 / 100MB push 限制。
+
+      - name: 安装 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.24.5
+
+      # 仓库里只提交了自定义代码，缺少 gradle wrapper / 资源图标等壳文件，
+      # 需要先 flutter create 把壳补齐。但 flutter create 会覆盖 MainActivity.kt /
+      # build.gradle / AndroidManifest.xml —— 因此先备份，再恢复，最后校验。
+      - name: 备份自定义原生代码（防 flutter create 覆盖）
+        run: |
+          mkdir -p /tmp/pk_backup
+          cp "android/app/src/main/kotlin/com/pocketkitty/pocket_kitty/MainActivity.kt" /tmp/pk_backup/MainActivity.kt
+          cp "android/app/build.gradle" /tmp/pk_backup/build.gradle
+          cp "android/app/src/main/AndroidManifest.xml" /tmp/pk_backup/AndroidManifest.xml
+
+      - name: 生成缺失的工程壳文件（gradlew / res 图标 / wrapper）
+        run: flutter create . --org com.pocketkitty --project-name pocket_kitty --platforms android
+
+      - name: 恢复自定义原生代码（保留抠图实现与 TFLite 依赖）
+        run: |
+          cp /tmp/pk_backup/MainActivity.kt "android/app/src/main/kotlin/com/pocketkitty/pocket_kitty/MainActivity.kt"
+          cp /tmp/pk_backup/build.gradle "android/app/build.gradle"
+          cp /tmp/pk_backup/AndroidManifest.xml "android/app/src/main/AndroidManifest.xml"
+
+      # 关键保险：确认恢复成功，避免打包出一个计数器 Demo
+      - name: 校验自定义原生代码已正确恢复
+        run: |
+          grep -q "pet_segmentation/segment" "android/app/src/main/kotlin/com/pocketkitty/pocket_kitty/MainActivity.kt" || { echo "❌ MainActivity.kt 未被正确恢复（可能被 flutter create 覆盖成计数器 Demo）"; exit 1; }
+          grep -q "tensorflow-lite" "android/app/build.gradle" || { echo "❌ build.gradle 未被正确恢复，TFLite 依赖缺失"; exit 1; }
+          grep -q "u2net" "android/app/src/main/kotlin/com/pocketkitty/pocket_kitty/MainActivity.kt" || { echo "❌ MainActivity.kt 未包含 u2net 主模型逻辑"; exit 1; }
+          echo "✅ 自定义代码校验通过"
+
+      # 下载抠图模型（放在 flutter create 之后，确保不被壳生成步骤干扰）
+      # 模型二进制不进仓库，规避 GitHub 25MB 上传 / 100MB push 限制；
+      # 由 CI 服务器现拉并打入 APK，用户手机端仍为纯离线、无网络权限。
+      - name: 下载抠图模型（主模型 u2net 84MB + 兜底 u2netp 4.4MB）
+        run: |
+          mkdir -p android/app/src/main/assets
+          # 主模型：全量 U2-Net（84MB，边缘质量最好）
+          if [ ! -f "android/app/src/main/assets/u2net.tflite" ]; then
+            echo "u2net.tflite（全量 84MB）缺失，自动下载补齐..."
+            curl -fsSL -o android/app/src/main/assets/u2net.tflite \
+              "https://huggingface.co/abhimanyu666/u2nettflite/resolve/main/u2net.tflite" \
+              || curl -fsSL -o android/app/src/main/assets/u2net.tflite \
+              "https://hf.co/abhimanyu666/u2nettflite/resolve/main/u2net.tflite"
+          fi
+          # 兜底模型：u2netp（4.4MB），主模型 OOM 时自动回退
+          if [ ! -f "android/app/src/main/assets/u2netp.tflite" ]; then
+            echo "u2netp.tflite（兜底 4.4MB）缺失，自动下载补齐..."
+            curl -fsSL -o android/app/src/main/assets/u2netp.tflite \
+              "https://huggingface.co/abhimanyu666/u2nettflite/resolve/main/u2netp.tflite" \
+              || curl -fsSL -o android/app/src/main/assets/u2netp.tflite \
+              "https://hf.co/abhimanyu666/u2nettflite/resolve/main/u2netp.tflite"
+          fi
+          echo "模型就位："
+          ls -la android/app/src/main/assets/
+          # 体积守卫：下载到 HuggingFace 错误页（HTML）体积远小于正常值时及时失败
+          if [ -f "android/app/src/main/assets/u2net.tflite" ]; then
+            SIZE=$(stat -c%s "android/app/src/main/assets/u2net.tflite")
+            echo "u2net.tflite 大小: ${SIZE} 字节"
+            if [ "$SIZE" -lt 80000000 ]; then
+              echo "❌ u2net.tflite 体积异常（<80MB），可能下载到错误页，请检查网络或镜像源"; exit 1
+            fi
+          else
+            echo "❌ 未生成 u2net.tflite，构建无法继续"; exit 1
+          fi
+          if [ -f "android/app/src/main/assets/u2netp.tflite" ]; then
+            SIZE=$(stat -c%s "android/app/src/main/assets/u2netp.tflite")
+            echo "u2netp.tflite 大小: ${SIZE} 字节"
+            if [ "$SIZE" -lt 3000000 ]; then
+              echo "❌ u2netp.tflite 体积异常（<3MB），可能下载到错误页，请检查网络或镜像源"; exit 1
+            fi
+          else
+            echo "❌ 未生成 u2netp.tflite，兜底缺失"; exit 1
+          fi
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 打包 APK
+        run: flutter build apk --release
+
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-kitty-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
